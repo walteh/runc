@@ -110,6 +110,81 @@ func prepareRootfs(pipe *syncSocket, iConfig *initConfig) (err error) {
 		rootlessCgroups: config.RootlessCgroups,
 		cgroupns:        config.Namespaces.Contains(configs.NEWCGROUP),
 	}
+
+	// Check if rootfs is virtiofs, which has issues with pivot_root
+	isVirtioFS := false
+	if stat, err := os.Stat(config.Rootfs); err == nil {
+		if statT, ok := stat.Sys().(*syscall.Stat_t); ok {
+			// Get mount information for the rootfs
+			mountinfos, err := mountinfo.GetMounts(func(info *mountinfo.Info) (skip, stop bool) {
+				return false, false // Get all mounts to check for virtiofs
+			})
+
+			if err == nil {
+				// First pass: log all mountpoints
+				fmt.Println("DEBUG: Filesystem types in this environment:")
+				for _, info := range mountinfos {
+					fmt.Printf("DEBUG:   %s: %s (device=%s)\n", info.Mountpoint, info.FSType, info.Source)
+				}
+
+				// Second pass: check for virtiofs
+				for _, info := range mountinfos {
+					// Check if this mount point corresponds to our rootfs
+					if strings.HasPrefix(config.Rootfs, info.Mountpoint) {
+						fmt.Printf("DEBUG: Rootfs mount point: %s, type: %s, source: %s\n",
+							info.Mountpoint, info.FSType, info.Source)
+						if info.FSType == "virtiofs" {
+							fmt.Println("DEBUG: Detected virtiofs rootfs, enabling NoPivotRoot automatically")
+							isVirtioFS = true
+							config.NoPivotRoot = true // Critical fix for virtiofs: Enable NoPivotRoot to use MS_MOVE
+							fmt.Printf("DEBUG: Setting NoPivotRoot=%v for virtiofs filesystem\n", config.NoPivotRoot)
+							break
+						}
+					}
+				}
+			}
+
+			if !isVirtioFS {
+				fmt.Printf("DEBUG: Rootfs device major:minor = %d:%d\n",
+					major(uint64(statT.Dev)), minor(uint64(statT.Dev)))
+
+				// Extra check: Try to detect shared devices/duplicates which might indicate
+				// we need NoPivotRoot even if not explicitly virtiofs
+				var rootDev uint64 = uint64(statT.Dev)
+				var foundShared bool
+
+				for _, info := range mountinfos {
+					if info.Mountpoint != config.Rootfs &&
+						info.Mountpoint != "/" &&
+						info.FSType != "proc" &&
+						info.FSType != "sysfs" {
+						if st, err := os.Stat(info.Mountpoint); err == nil {
+							if stSys, ok := st.Sys().(*syscall.Stat_t); ok {
+								if uint64(stSys.Dev) == rootDev {
+									fmt.Printf("DEBUG: Found shared device: rootfs and %s both on device %d:%d\n",
+										info.Mountpoint, major(rootDev), minor(rootDev))
+									foundShared = true
+								}
+							}
+						}
+					}
+				}
+
+				if foundShared {
+					fmt.Println("DEBUG: Multiple filesystems on same device as rootfs - enabling NoPivotRoot")
+					config.NoPivotRoot = true
+				}
+			}
+		}
+	}
+
+	// Also check /proc/mounts for additional filesystem info
+	procMounts, err := os.ReadFile("/proc/mounts")
+	if err == nil {
+		fmt.Println("DEBUG: /proc/mounts contents:")
+		fmt.Println(string(procMounts))
+	}
+
 	for _, m := range config.Mounts {
 		entry := mountEntry{Mount: m}
 		// Figure out whether we need to request runc to give us an
@@ -205,8 +280,10 @@ func prepareRootfs(pipe *syncSocket, iConfig *initConfig) (err error) {
 	}
 
 	if config.NoPivotRoot {
+		fmt.Println("DEBUG: NoPivotRoot is set, using msMoveRoot")
 		err = msMoveRoot(config.Rootfs)
 	} else if config.Namespaces.Contains(configs.NEWNS) {
+		fmt.Println("DEBUG: pivoting root to", config.Rootfs)
 		err = pivotRoot(config.Rootfs)
 	} else {
 		err = chroot()
@@ -1074,39 +1151,99 @@ func setupPtmx(config *configs.Config) error {
 // pivotRoot will call pivot_root such that rootfs becomes the new root
 // filesystem, and everything else is cleaned up.
 func pivotRoot(rootfs string) error {
-	// While the documentation may claim otherwise, pivot_root(".", ".") is
-	// actually valid. What this results in is / being the new root but
-	// /proc/self/cwd being the old root. Since we can play around with the cwd
-	// with pivot_root this allows us to pivot without creating directories in
-	// the rootfs. Shout-outs to the LXC developers for giving us this idea.
+	fmt.Println("DEBUG: Starting pivotRoot with rootfs:", rootfs)
+
+	// Add debug info about the current mounts
+	mountData, err := os.ReadFile("/proc/self/mountinfo")
+	if err == nil {
+		fmt.Println("DEBUG: Current mountinfo:")
+		fmt.Println(string(mountData))
+	} else {
+		fmt.Println("DEBUG: Failed to read mountinfo:", err)
+	}
+
+	// Debug: dump propagation info for new_root and for "/"
+	infoList, _ := mountinfo.GetMounts(nil)
+	for _, mi := range infoList {
+		// only interested in the new_root mount and the real "/"
+		if strings.HasPrefix(rootfs, mi.Mountpoint) || mi.Mountpoint == "/" {
+			fmt.Printf("DEBUG: mount %q (fs=%s) optional fields: %v\n",
+				mi.Mountpoint, mi.FSType, mi.Optional)
+		}
+	}
 
 	oldroot, err := linux.Open("/", unix.O_DIRECTORY|unix.O_RDONLY, 0)
 	if err != nil {
+		fmt.Println("DEBUG: Failed to open oldroot:", err)
 		return err
 	}
 	defer unix.Close(oldroot)
 
 	newroot, err := linux.Open(rootfs, unix.O_DIRECTORY|unix.O_RDONLY, 0)
 	if err != nil {
+		fmt.Println("DEBUG: Failed to open newroot:", err)
 		return err
 	}
 	defer unix.Close(newroot)
 
 	// Change to the new root so that the pivot_root actually acts on it.
 	if err := unix.Fchdir(newroot); err != nil {
+		fmt.Println("DEBUG: Failed to fchdir to newroot:", err)
 		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(newroot), Err: err}
 	}
 
+	// Get current directory for debugging
+	cwd, _ := os.Getwd()
+	fmt.Println("DEBUG: Current working directory before pivot_root:", cwd)
+
+	// Check if rootfs is a mount point
+	var st1, st2 unix.Stat_t
+	if err := unix.Stat(".", &st1); err != nil {
+		fmt.Println("DEBUG: Failed to stat current directory:", err)
+	}
+	if err := unix.Stat("..", &st2); err != nil {
+		fmt.Println("DEBUG: Failed to stat parent directory:", err)
+	}
+	fmt.Printf("DEBUG: Check if mount point: dev %d:%d vs parent %d:%d\n",
+		major(st1.Dev), minor(st1.Dev), major(st2.Dev), minor(st2.Dev))
+	fmt.Printf("DEBUG: Current dir ino=%d, parent dir ino=%d\n", st1.Ino, st2.Ino)
+
+	// Debug: skip capability check for simplicity
+	fmt.Println("DEBUG: skipping CAP_SYS_ADMIN check (assume root in this namespace)")
+
+	// Wrapped pivot_root syscall with logging
+	fmt.Println("DEBUG: Attempting PivotRoot with raw SYS_PIVOT_ROOT syscall")
 	if err := unix.PivotRoot(".", "."); err != nil {
+		fmt.Printf("DEBUG: PivotRoot failed with error: %v (errno: %d)\n", err, err.(unix.Errno))
+
+		// Detailed error investigation
+		if err == unix.EINVAL {
+			fmt.Println("DEBUG: EINVAL error - this typically means:")
+			fmt.Println("  1. New root is not a mount point")
+			fmt.Println("  2. Old root and new root are on the same filesystem")
+			fmt.Println("  3. Old root is not at the root of its filesystem")
+
+			// Check exact kernel version
+			uname := &syscall.Utsname{}
+			if syscall.Uname(uname) == nil {
+				var buf [65]byte
+				for i, b := range uname.Release {
+					if b == 0 {
+						buf[i] = 0
+						break
+					}
+					buf[i] = byte(b)
+				}
+				fmt.Printf("DEBUG: Kernel version: %s\n", string(buf[:]))
+			}
+		}
+
 		return &os.PathError{Op: "pivot_root", Path: ".", Err: err}
 	}
 
-	// Currently our "." is oldroot (according to the current kernel code).
-	// However, purely for safety, we will fchdir(oldroot) since there isn't
-	// really any guarantee from the kernel what /proc/self/cwd will be after a
-	// pivot_root(2).
-
+	fmt.Println("DEBUG: PivotRoot succeeded, changing directory back to oldroot")
 	if err := unix.Fchdir(oldroot); err != nil {
+		fmt.Println("DEBUG: Failed to fchdir back to oldroot:", err)
 		return &os.PathError{Op: "fchdir", Path: "fd " + strconv.Itoa(oldroot), Err: err}
 	}
 
@@ -1116,21 +1253,69 @@ func pivotRoot(rootfs string) error {
 	// mount while a process in the host namespace are trying to operate on
 	// something they think has no mounts (devicemapper in particular).
 	if err := mount("", ".", "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
+		fmt.Println("DEBUG: Failed to make oldroot rslave:", err)
 		return err
 	}
 	// Perform the unmount. MNT_DETACH allows us to unmount /proc/self/cwd.
 	if err := unmount(".", unix.MNT_DETACH); err != nil {
+		fmt.Println("DEBUG: Failed to unmount oldroot:", err)
 		return err
 	}
 
 	// Switch back to our shiny new root.
 	if err := unix.Chdir("/"); err != nil {
+		fmt.Println("DEBUG: Failed to chdir to new root:", err)
 		return &os.PathError{Op: "chdir", Path: "/", Err: err}
 	}
+	fmt.Println("DEBUG: PivotRoot completed successfully")
 	return nil
 }
 
+// Helper function to get major and minor device numbers
+func major(dev uint64) uint32 {
+	return uint32((dev >> 32) & 0xffffffff)
+}
+
+func minor(dev uint64) uint32 {
+	return uint32(dev & 0xffffffff)
+}
+
 func msMoveRoot(rootfs string) error {
+	startTime := time.Now()
+	fmt.Printf("DEBUG[%s]: Starting msMoveRoot with rootfs: %s\n", time.Since(startTime), rootfs)
+
+	// Check for rootfs existence and accessibility first
+	if _, err := os.Stat(rootfs); err != nil {
+		fmt.Printf("DEBUG[%s]: Error accessing rootfs: %v\n", time.Since(startTime), err)
+		return fmt.Errorf("cannot access rootfs: %w", err)
+	}
+
+	// Special check for virtiofs type before proceeding
+	mountinfos, err := mountinfo.GetMounts(nil)
+	if err != nil {
+		fmt.Printf("DEBUG[%s]: Error getting mounts: %v\n", time.Since(startTime), err)
+	} else {
+		rootfsFound := false
+		rootfsType := "unknown"
+		for _, info := range mountinfos {
+			if strings.HasPrefix(rootfs, info.Mountpoint) {
+				rootfsFound = true
+				rootfsType = info.FSType
+				fmt.Printf("DEBUG[%s]: Rootfs is on %s filesystem at %s\n",
+					time.Since(startTime), info.FSType, info.Mountpoint)
+				break
+			}
+		}
+		if !rootfsFound {
+			fmt.Printf("DEBUG[%s]: WARNING: Rootfs %s not found in mount table!\n",
+				time.Since(startTime), rootfs)
+		}
+		if rootfsType == "virtiofs" {
+			fmt.Printf("DEBUG[%s]: IMPORTANT: Rootfs is virtiofs, which can have issues with MS_MOVE\n",
+				time.Since(startTime))
+		}
+	}
+
 	// Before we move the root and chroot we have to mask all "full" sysfs and
 	// procfs mounts which exist on the host. This is because while the kernel
 	// has protections against mounting procfs if it has masks, when using
@@ -1148,7 +1333,8 @@ func msMoveRoot(rootfs string) error {
 	// So we try to unmount (or mount tmpfs on top of) any mountpoint which is
 	// a full mount of either sysfs or procfs (since those are the most
 	// concerning filesystems to us).
-	mountinfos, err := mountinfo.GetMounts(func(info *mountinfo.Info) (skip, stop bool) {
+	fmt.Printf("DEBUG[%s]: Getting mount info for /proc and /sys filesystems\n", time.Since(startTime))
+	mounts, err := mountinfo.GetMounts(func(info *mountinfo.Info) (skip, stop bool) {
 		// Collect every sysfs and procfs filesystem, except for those which
 		// are non-full mounts or are inside the rootfs of the container.
 		if info.Root != "/" ||
@@ -1159,47 +1345,122 @@ func msMoveRoot(rootfs string) error {
 		return
 	})
 	if err != nil {
+		fmt.Printf("DEBUG[%s]: Error getting mounts: %v\n", time.Since(startTime), err)
 		return err
 	}
+
+	fmt.Printf("DEBUG[%s]: Found %d /proc and /sys mounts to mask\n", time.Since(startTime), len(mounts))
+
+	// Check if there are any virtiofs mounts (which might be problematic)
 	for _, info := range mountinfos {
+		if info.FSType == "virtiofs" {
+			fmt.Printf("DEBUG[%s]: Found virtiofs mount at %s (source: %s)\n",
+				time.Since(startTime), info.Mountpoint, info.Source)
+		}
+	}
+
+	// Try to handle each mount point separately, with detailed timing info
+	for idx, info := range mounts {
 		p := info.Mountpoint
+		mountStart := time.Now()
+		fmt.Printf("DEBUG[%s]: Processing mountpoint %d/%d: %s\n", time.Since(startTime), idx+1, len(mounts), p)
+
 		// Be sure umount events are not propagated to the host.
+		msSlaveStart := time.Now()
 		if err := mount("", p, "", unix.MS_SLAVE|unix.MS_REC, ""); err != nil {
+			fmt.Printf("DEBUG[%s]: MS_SLAVE operation took %s\n", time.Since(startTime), time.Since(msSlaveStart))
 			if errors.Is(err, unix.ENOENT) {
+				fmt.Printf("DEBUG[%s]: Mount point doesn't exist (ENOENT): %s\n", time.Since(startTime), p)
 				// If the mountpoint doesn't exist that means that we've
 				// already blasted away some parent directory of the mountpoint
 				// and so we don't care about this error.
 				continue
 			}
+			fmt.Printf("DEBUG[%s]: Failed to make mount slave: %s, %v\n", time.Since(startTime), p, err)
 			return err
 		}
+		fmt.Printf("DEBUG[%s]: MS_SLAVE operation took %s\n", time.Since(startTime), time.Since(msSlaveStart))
+
+		umountStart := time.Now()
+		fmt.Printf("DEBUG[%s]: Attempting to unmount: %s\n", time.Since(startTime), p)
 		if err := unmount(p, unix.MNT_DETACH); err != nil {
+			fmt.Printf("DEBUG[%s]: Unmount operation took %s\n", time.Since(startTime), time.Since(umountStart))
 			if !errors.Is(err, unix.EINVAL) && !errors.Is(err, unix.EPERM) {
+				fmt.Printf("DEBUG[%s]: Failed to unmount with error: %v\n", time.Since(startTime), err)
 				return err
 			} else {
 				// If we have not privileges for umounting (e.g. rootless), then
 				// cover the path.
+				fmt.Printf("DEBUG[%s]: No unmount privileges, trying tmpfs mount over: %s\n", time.Since(startTime), p)
+				tmpfsMountStart := time.Now()
 				if err := mount("tmpfs", p, "tmpfs", 0, ""); err != nil {
+					fmt.Printf("DEBUG[%s]: Tmpfs mount operation took %s\n", time.Since(startTime), time.Since(tmpfsMountStart))
+					fmt.Printf("DEBUG[%s]: Failed to mount tmpfs over: %s, %v\n", time.Since(startTime), p, err)
 					return err
 				}
+				fmt.Printf("DEBUG[%s]: Tmpfs mount operation took %s\n", time.Since(startTime), time.Since(tmpfsMountStart))
+				fmt.Printf("DEBUG[%s]: Successfully mounted tmpfs over: %s\n", time.Since(startTime), p)
 			}
+		} else {
+			fmt.Printf("DEBUG[%s]: Unmount operation took %s\n", time.Since(startTime), time.Since(umountStart))
+			fmt.Printf("DEBUG[%s]: Successfully unmounted: %s\n", time.Since(startTime), p)
 		}
+		fmt.Printf("DEBUG[%s]: Mount point %d/%d processed in %s\n",
+			time.Since(startTime), idx+1, len(mounts), time.Since(mountStart))
 	}
 
+	// Check if rootfs is a mountpoint to prevent potential MS_MOVE issues
+	var st1, st2 unix.Stat_t
+	if err := unix.Stat(rootfs, &st1); err != nil {
+		fmt.Printf("DEBUG[%s]: Failed to stat rootfs: %v\n", time.Since(startTime), err)
+	}
+	rootfsParent := filepath.Dir(rootfs)
+	if err := unix.Stat(rootfsParent, &st2); err != nil {
+		fmt.Printf("DEBUG[%s]: Failed to stat rootfs parent: %v\n", time.Since(startTime), err)
+	}
+	isMountPoint := st1.Dev != st2.Dev
+	fmt.Printf("DEBUG[%s]: Rootfs is mount point: %v (dev %d:%d vs parent %d:%d)\n",
+		time.Since(startTime), isMountPoint, major(uint64(st1.Dev)), minor(uint64(st1.Dev)),
+		major(uint64(st2.Dev)), minor(uint64(st2.Dev)))
+
+	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION START: Attempting MS_MOVE of rootfs to / ***\n", time.Since(startTime))
+	msMoveStart := time.Now()
 	// Move the rootfs on top of "/" in our mount namespace.
 	if err := mount(rootfs, "/", "", unix.MS_MOVE, ""); err != nil {
+		fmt.Printf("DEBUG[%s]: MS_MOVE failed after %s: %v\n", time.Since(startTime), time.Since(msMoveStart), err)
 		return err
 	}
-	return chroot()
+	fmt.Printf("DEBUG[%s]: MS_MOVE operation took %s\n", time.Since(startTime), time.Since(msMoveStart))
+
+	chrootStart := time.Now()
+	fmt.Printf("DEBUG[%s]: MS_MOVE successful, calling chroot (total time so far: %s)\n",
+		time.Since(startTime), time.Since(startTime))
+	err = chroot()
+	fmt.Printf("DEBUG[%s]: Chroot operation took %s\n", time.Since(startTime), time.Since(chrootStart))
+	if err != nil {
+		fmt.Printf("DEBUG[%s]: Chroot failed: %v\n", time.Since(startTime), err)
+		return err
+	}
+	fmt.Printf("DEBUG[%s]: msMoveRoot completed successfully in total time %s\n", time.Since(startTime), time.Since(startTime))
+	return nil
 }
 
 func chroot() error {
+	startTime := time.Now()
+	fmt.Printf("DEBUG[%s]: Starting chroot function\n", time.Since(startTime))
+
 	if err := unix.Chroot("."); err != nil {
+		fmt.Printf("DEBUG[%s]: Chroot failed: %v\n", time.Since(startTime), err)
 		return &os.PathError{Op: "chroot", Path: ".", Err: err}
 	}
+	fmt.Printf("DEBUG[%s]: Chroot succeeded, changing directory to /\n", time.Since(startTime))
+
 	if err := unix.Chdir("/"); err != nil {
+		fmt.Printf("DEBUG[%s]: Chdir to / failed: %v\n", time.Since(startTime), err)
 		return &os.PathError{Op: "chdir", Path: "/", Err: err}
 	}
+	fmt.Printf("DEBUG[%s]: Chdir to / succeeded, chroot complete\n", time.Since(startTime))
+
 	return nil
 }
 

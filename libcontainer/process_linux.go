@@ -1,6 +1,7 @@
 package libcontainer
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -399,11 +400,29 @@ type initProcess struct {
 
 // getChildPid receives the final child's pid over the provided pipe.
 func (p *initProcess) getChildPid() (int, error) {
+	fmt.Fprintf(os.Stderr, "DEBUG: Attempting to read PID from pipe, pipe exists: %v\n", p.comm.initSockParent != nil)
+
+	// Check if pipe is valid and ready for reading
+	if p.comm.initSockParent != nil {
+		stat, _ := p.comm.initSockParent.Stat()
+		fmt.Fprintf(os.Stderr, "DEBUG: Pipe stat: %+v\n", stat)
+	}
+
 	var pid pid
 	if err := json.NewDecoder(p.comm.initSockParent).Decode(&pid); err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG: Error while reading child PID: %v\n", err)
+		// Try to get any error output from the child before failing
+		errBuf := make([]byte, 1024)
+		n, _ := p.comm.logPipeParent.Read(errBuf)
+		if n > 0 {
+			fmt.Fprintf(os.Stderr, "DEBUG: Child error output: %s\n", errBuf[:n])
+		}
+
 		_ = p.cmd.Wait()
 		return -1, err
 	}
+
+	fmt.Fprintf(os.Stderr, "DEBUG: Successfully decoded PID: %d, FirstChildPID: %d\n", pid.Pid, pid.PidFirstChild)
 
 	// Clean up the zombie parent process
 	// On Unix systems FindProcess always succeeds.
@@ -606,8 +625,42 @@ func (p *initProcess) start() (retErr error) {
 			return fmt.Errorf("unable to apply Intel RDT configuration: %w", err)
 		}
 	}
-	if _, err := io.Copy(p.comm.initSockParent, p.bootstrapData); err != nil {
+
+	buf := bytes.NewBuffer(nil)
+
+	fmt.Fprintf(os.Stderr, "DEBUG: About to write bootstrap data, process alive: %v\n", p.cmd.Process != nil)
+	if p.cmd.Process != nil {
+		// Check if process is still alive
+		if err := p.cmd.Process.Signal(unix.Signal(0)); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: Process no longer responding: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG: Process still responding to signals\n")
+		}
+	}
+
+	if _, err := io.Copy(p.comm.initSockParent, io.TeeReader(p.bootstrapData, buf)); err != nil {
 		return fmt.Errorf("can't copy bootstrap data to pipe: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "DEBUG: Successfully wrote bootstrap data: %v\n", buf.Bytes())
+	fmt.Fprintf(os.Stderr, "DEBUG: Checking if cmd process still exists before getChildPid: %v\n", p.cmd.Process != nil)
+
+	if p.cmd.Process != nil {
+		exitCode := -1
+		if p.cmd.ProcessState != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: ProcessState exists: %v\n", p.cmd.ProcessState)
+			if p.cmd.ProcessState.Exited() {
+				exitCode = p.cmd.ProcessState.ExitCode()
+				fmt.Fprintf(os.Stderr, "DEBUG: Process already exited with code: %d\n", exitCode)
+			}
+		}
+
+		// Check process status from /proc
+		if _, err := os.Stat(fmt.Sprintf("/proc/%d", p.cmd.Process.Pid)); err != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG: Process directory in /proc doesn't exist: %v\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "DEBUG: Process directory in /proc still exists\n")
+		}
 	}
 
 	childPid, err := p.getChildPid()
@@ -658,6 +711,8 @@ func (p *initProcess) start() (retErr error) {
 		}
 	}
 
+	fmt.Printf("p.config %v\n", p.config)
+
 	if err := utils.WriteJSON(p.comm.initSockParent, p.config); err != nil {
 		return fmt.Errorf("error sending config to init process: %w", err)
 	}
@@ -676,9 +731,30 @@ func (p *initProcess) start() (retErr error) {
 			if err := json.Unmarshal(*sync.Arg, &m); err != nil {
 				return fmt.Errorf("sync %q passed invalid mount arg: %w", sync.Type, err)
 			}
-			mnt, err := mountRequest(m)
-			if err != nil {
-				return fmt.Errorf("failed to fulfil mount request: %w", err)
+			mnt, errd := mountRequest(m)
+			if errd != nil {
+				// run a quick ls -la in the dir for fun
+				ls, err := os.ReadDir(filepath.Dir(m.Source))
+				if err == nil {
+					fmt.Printf("source:\n")
+					for _, f := range ls {
+						fmt.Printf("file: %s\n", f.Name())
+					}
+				} else {
+					fmt.Printf("error reading source: %v\n", err)
+				}
+
+				ls, err = os.ReadDir("/")
+				if err == nil {
+					fmt.Printf("rootfs:\n")
+					for _, f := range ls {
+						fmt.Printf("file: %s\n", f.Name())
+					}
+				} else {
+					fmt.Printf("error reading source: %v\n", err)
+				}
+
+				return fmt.Errorf("failed to fulfil mount request: %w", errd)
 			}
 			defer mnt.file.Close()
 
