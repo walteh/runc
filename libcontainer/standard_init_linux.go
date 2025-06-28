@@ -3,6 +3,7 @@ package libcontainer
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"time"
@@ -49,10 +50,10 @@ func (l *linuxStandardInit) getSessionRingParams() (string, uint32, uint32) {
 
 func (l *linuxStandardInit) Init() error {
 	startTime := time.Now()
-	fmt.Printf("DEBUG[%s]: Starting linuxStandardInit.Init()\n", time.Since(startTime))
+	slog.Debug("DEBUG: Starting linuxStandardInit.Init()", "time", time.Since(startTime))
 
 	if !l.config.Config.NoNewKeyring {
-		fmt.Printf("DEBUG[%s]: Setting up keyring\n", time.Since(startTime))
+		slog.Debug("DEBUG: Setting up keyring", "time", time.Since(startTime))
 		if l.config.ProcessLabel != "" {
 			if err := selinux.SetKeyLabel(l.config.ProcessLabel); err != nil {
 				return err
@@ -82,7 +83,7 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	fmt.Printf("DEBUG[%s]: Setting up network\n", time.Since(startTime))
+	slog.Debug("DEBUG: Setting up network", "time", time.Since(startTime))
 	if err := setupNetwork(l.config); err != nil {
 		return err
 	}
@@ -93,19 +94,19 @@ func (l *linuxStandardInit) Init() error {
 	// initialises the labeling system
 	selinux.GetEnabled()
 
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to call prepareRootfs ***\n", time.Since(startTime))
-	fmt.Printf("DEBUG[%s]: NoPivotRoot=%v\n", time.Since(startTime), l.config.Config.NoPivotRoot)
+	slog.Debug("DEBUG: *** CRITICAL SECTION: About to call prepareRootfs ***", "time", time.Since(startTime))
+	slog.Debug("DEBUG: NoPivotRoot=%v", "time", time.Since(startTime), "noPivotRoot", l.config.Config.NoPivotRoot)
 	err := prepareRootfs(l.pipe, l.config)
 	if err != nil {
-		fmt.Printf("DEBUG[%s]: prepareRootfs failed with error: %v\n", time.Since(startTime), err)
+		slog.Debug("DEBUG: prepareRootfs failed with error", "time", time.Since(startTime), "error", err)
 		return err
 	}
-	fmt.Printf("DEBUG[%s]: *** prepareRootfs completed successfully ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** prepareRootfs completed successfully ***", "time", time.Since(startTime))
 
 	// Set up the console. This has to be done *before* we finalize the rootfs,
 	// but *after* we've given the user the chance to set up all of the mounts
 	// they wanted.
-	fmt.Printf("DEBUG[%s]: Setting up console\n", time.Since(startTime))
+	slog.Debug("DEBUG: Setting up console", "time", time.Since(startTime))
 	if l.config.CreateConsole {
 		if err := setupConsole(l.consoleSocket, l.config, true); err != nil {
 			return err
@@ -116,24 +117,24 @@ func (l *linuxStandardInit) Init() error {
 	}
 
 	if l.pidfdSocket != nil {
-		fmt.Printf("DEBUG[%s]: Setting up pidfd\n", time.Since(startTime))
+		slog.Debug("DEBUG: Setting up pidfd", "time", time.Since(startTime))
 		if err := setupPidfd(l.pidfdSocket, "standard"); err != nil {
 			return fmt.Errorf("failed to setup pidfd: %w", err)
 		}
 	}
 
 	// Finish the rootfs setup.
-	fmt.Printf("DEBUG[%s]: NoPivotRoot=%v before finalizeRootfs\n", time.Since(startTime), l.config.Config.NoPivotRoot)
+	slog.Debug("DEBUG: NoPivotRoot=%v before finalizeRootfs", "time", time.Since(startTime), "noPivotRoot", l.config.Config.NoPivotRoot)
 	if l.config.Config.Namespaces.Contains(configs.NEWNS) {
-		fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to call finalizeRootfs ***\n", time.Since(startTime))
+		slog.Debug("DEBUG: *** CRITICAL SECTION: About to call finalizeRootfs ***", "time", time.Since(startTime))
 		if err := finalizeRootfs(l.config.Config); err != nil {
-			fmt.Printf("DEBUG[%s]: finalizeRootfs failed with error: %v\n", time.Since(startTime), err)
+			slog.Debug("DEBUG: finalizeRootfs failed with error", "time", time.Since(startTime), "error", err)
 			return err
 		}
-		fmt.Printf("DEBUG[%s]: *** finalizeRootfs completed successfully ***\n", time.Since(startTime))
+		slog.Debug("DEBUG: *** finalizeRootfs completed successfully ***", "time", time.Since(startTime))
 	}
 
-	fmt.Printf("DEBUG[%s]: Setting hostname and domainname\n", time.Since(startTime))
+	slog.Debug("DEBUG: Setting hostname and domainname", "time", time.Since(startTime))
 	if hostname := l.config.Config.Hostname; hostname != "" {
 		if err := unix.Sethostname([]byte(hostname)); err != nil {
 			return &os.SyscallError{Syscall: "sethostname", Err: err}
@@ -148,7 +149,7 @@ func (l *linuxStandardInit) Init() error {
 		return fmt.Errorf("unable to apply apparmor profile: %w", err)
 	}
 
-	fmt.Printf("DEBUG[%s]: Setting up sysctls, readonly paths, and mask paths\n", time.Since(startTime))
+	slog.Debug("DEBUG: Setting up sysctls, readonly paths, and mask paths", "time", time.Since(startTime))
 	for key, value := range l.config.Config.Sysctl {
 		if err := writeSystemProperty(key, value); err != nil {
 			return err
@@ -174,7 +175,7 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	fmt.Printf("DEBUG[%s]: Setting up scheduler and IO priority\n", time.Since(startTime))
+	slog.Debug("DEBUG: Setting up scheduler and IO priority", "time", time.Since(startTime))
 	if err := setupScheduler(l.config); err != nil {
 		return err
 	}
@@ -186,11 +187,11 @@ func (l *linuxStandardInit) Init() error {
 	// Tell our parent that we're ready to exec. This must be done before the
 	// Seccomp rules have been applied, because we need to be able to read and
 	// write to a socket.
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to call syncParentReady ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** CRITICAL SECTION: About to call syncParentReady ***", "time", time.Since(startTime))
 	if err := syncParentReady(l.pipe); err != nil {
 		return fmt.Errorf("sync ready: %w", err)
 	}
-	fmt.Printf("DEBUG[%s]: *** syncParentReady completed successfully ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** syncParentReady completed successfully ***", "time", time.Since(startTime))
 
 	if l.config.ProcessLabel != "" {
 		if err := selinux.SetExecLabel(l.config.ProcessLabel); err != nil {
@@ -202,7 +203,7 @@ func (l *linuxStandardInit) Init() error {
 	// do this before dropping capabilities; otherwise do it as late as possible
 	// just before execve so as few syscalls take place after it as possible.
 	if l.config.Config.Seccomp != nil && !l.config.NoNewPrivileges {
-		fmt.Printf("DEBUG[%s]: Initializing seccomp\n", time.Since(startTime))
+		slog.Debug("DEBUG: Initializing seccomp", "time", time.Since(startTime))
 		seccompFd, err := seccomp.InitSeccomp(l.config.Config.Seccomp)
 		if err != nil {
 			return err
@@ -213,12 +214,12 @@ func (l *linuxStandardInit) Init() error {
 		}
 	}
 
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to call finalizeNamespace ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** CRITICAL SECTION: About to call finalizeNamespace ***", "time", time.Since(startTime))
 	if err := finalizeNamespace(l.config); err != nil {
-		fmt.Printf("DEBUG[%s]: finalizeNamespace failed with error: %v\n", time.Since(startTime), err)
+		slog.Debug("DEBUG: finalizeNamespace failed with error", "time", time.Since(startTime), "error", err)
 		return err
 	}
-	fmt.Printf("DEBUG[%s]: *** finalizeNamespace completed successfully ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** finalizeNamespace completed successfully ***", "time", time.Since(startTime))
 
 	// finalizeNamespace can change user/group which clears the parent death
 	// signal, so we restore it here.
@@ -240,7 +241,7 @@ func (l *linuxStandardInit) Init() error {
 	// sure that it did not change.  if the parent changes that means it died
 	// and we were reparented to something else so we should just kill ourself
 	// and not cause problems for someone else.
-	fmt.Printf("DEBUG[%s]: Checking parent process\n", time.Since(startTime))
+	slog.Debug("DEBUG: Checking parent process", "time", time.Since(startTime))
 	if unix.Getppid() != l.parentPid {
 		return unix.Kill(unix.Getpid(), unix.SIGKILL)
 	}
@@ -257,7 +258,7 @@ func (l *linuxStandardInit) Init() error {
 	// before closing the pipe since we need it to pass the seccompFd to
 	// the parent.
 	if l.config.Config.Seccomp != nil && l.config.NoNewPrivileges {
-		fmt.Printf("DEBUG[%s]: Initializing seccomp (with NoNewPrivileges)\n", time.Since(startTime))
+		slog.Debug("DEBUG: Initializing seccomp (with NoNewPrivileges)", "time", time.Since(startTime))
 		seccompFd, err := seccomp.InitSeccomp(l.config.Config.Seccomp)
 		if err != nil {
 			return fmt.Errorf("unable to init seccomp: %w", err)
@@ -270,7 +271,7 @@ func (l *linuxStandardInit) Init() error {
 
 	// Set personality if specified.
 	if l.config.Config.Personality != nil {
-		fmt.Printf("DEBUG[%s]: Setting up personality\n", time.Since(startTime))
+		slog.Debug("DEBUG: Setting up personality", "time", time.Since(startTime))
 		if err := setupPersonality(l.config.Config); err != nil {
 			return err
 		}
@@ -278,17 +279,17 @@ func (l *linuxStandardInit) Init() error {
 
 	// Close the pipe to signal that we have completed our init.
 	logrus.Debugf("init: closing the pipe to signal completion")
-	fmt.Printf("DEBUG[%s]: Closing pipe to signal completion\n", time.Since(startTime))
+	slog.Debug("DEBUG: Closing pipe to signal completion", "time", time.Since(startTime))
 	_ = l.pipe.Close()
 
 	// Close the log pipe fd so the parent's ForwardLogs can exit.
 	logrus.Debugf("init: about to wait on exec fifo")
-	fmt.Printf("DEBUG[%s]: Closing log pipe\n", time.Since(startTime))
+	slog.Debug("DEBUG: Closing log pipe", "time", time.Since(startTime))
 	if err := l.logPipe.Close(); err != nil {
 		return fmt.Errorf("close log pipe: %w", err)
 	}
 
-	fmt.Printf("DEBUG[%s]: About to wait on exec fifo\n", time.Since(startTime))
+	slog.Debug("DEBUG: About to wait on exec fifo", "time", time.Since(startTime))
 	fifoPath, closer := utils.ProcThreadSelfFd(l.fifoFile.Fd())
 	defer closer()
 
@@ -296,45 +297,55 @@ func (l *linuxStandardInit) Init() error {
 	// user process. We open it through /proc/self/fd/$fd, because the fd that
 	// was given to us was an O_PATH fd to the fifo itself. Linux allows us to
 	// re-open an O_PATH fd through /proc.
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: Opening fifo at %s ***\n", time.Since(startTime), fifoPath)
+	slog.Debug("DEBUG: *** CRITICAL SECTION: Opening fifo at %s ***", "time", time.Since(startTime), "fifoPath", fifoPath)
 
-	// Set a timeout for the FIFO open operation to prevent hanging indefinitely
-	// Create a channel to signal when the open is done
+	delay := false
+
 	openDone := make(chan struct{})
 	var fd int
 	var openErr error
 
-	// Start a goroutine to open the FIFO
-	go func() {
-		fmt.Printf("DEBUG[%s]: Starting goroutine to open FIFO\n", time.Since(startTime))
+	if delay {
+		// Set a timeout for the FIFO open operation to prevent hanging indefinitely
+		// Create a channel to signal when the open is done
+
+		// Start a goroutine to open the FIFO
+		go func() {
+			slog.Debug("DEBUG: Starting goroutine to open FIFO", "time", time.Since(startTime))
+			fd, openErr = linux.Open(fifoPath, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+			close(openDone)
+		}()
+
+		// Wait for either the open to complete or a timeout
+		select {
+		case <-openDone:
+			if openErr != nil {
+				slog.Debug("DEBUG: Failed to open fifo", "time", time.Since(startTime), "error", openErr)
+				return openErr
+			}
+			slog.Debug("DEBUG: FIFO opened successfully", "time", time.Since(startTime))
+		case <-time.After(5 * time.Second): // 5 second timeout, adjust as needed
+			slog.Debug("DEBUG: FIFO open timed out after 5 seconds, proceeding anyway", "time", time.Since(startTime))
+			// If we're timing out, we need to force proceed with container init
+			// Skip the normal FIFO sync and proceed to exec
+			// This is a workaround for the case where the parent isn't properly handling the FIFO
+			slog.Debug("DEBUG: *** CRITICAL SECTION: About to close file descriptors (after FIFO timeout) ***", "time", time.Since(startTime))
+			if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
+				slog.Debug("DEBUG: Failed to close file descriptors", "time", time.Since(startTime), "error", err)
+				return err
+			}
+			slog.Debug("DEBUG: *** CRITICAL SECTION: About to exec %s (after FIFO timeout) ***", "time", time.Since(startTime), "args", l.config.Args[0])
+			return linux.Exec(l.config.Args[0], l.config.Args, l.config.Env)
+		}
+
+		// If we get here, the FIFO was opened successfully
+		slog.Debug("DEBUG: Writing to fifo", "time", time.Since(startTime))
+		slog.Debug("DEBUG: Starting goroutine to open FIFO", "time", time.Since(startTime))
+	} else {
 		fd, openErr = linux.Open(fifoPath, unix.O_WRONLY|unix.O_CLOEXEC, 0)
 		close(openDone)
-	}()
 
-	// Wait for either the open to complete or a timeout
-	select {
-	case <-openDone:
-		if openErr != nil {
-			fmt.Printf("DEBUG[%s]: Failed to open fifo: %v\n", time.Since(startTime), openErr)
-			return openErr
-		}
-		fmt.Printf("DEBUG[%s]: FIFO opened successfully\n", time.Since(startTime))
-	case <-time.After(5 * time.Second): // 5 second timeout, adjust as needed
-		fmt.Printf("DEBUG[%s]: FIFO open timed out after 5 seconds, proceeding anyway\n", time.Since(startTime))
-		// If we're timing out, we need to force proceed with container init
-		// Skip the normal FIFO sync and proceed to exec
-		// This is a workaround for the case where the parent isn't properly handling the FIFO
-		fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to close file descriptors (after FIFO timeout) ***\n", time.Since(startTime))
-		if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
-			fmt.Printf("DEBUG[%s]: Failed to close file descriptors: %v\n", time.Since(startTime), err)
-			return err
-		}
-		fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to exec %s (after FIFO timeout) ***\n", time.Since(startTime), l.config.Args[0])
-		return linux.Exec(l.config.Args[0], l.config.Args, l.config.Env)
 	}
-
-	// If we get here, the FIFO was opened successfully
-	fmt.Printf("DEBUG[%s]: Writing to fifo\n", time.Since(startTime))
 	if _, err := unix.Write(fd, []byte("0")); err != nil {
 		return &os.PathError{Op: "write exec fifo", Path: fifoPath, Err: err}
 	}
@@ -345,11 +356,11 @@ func (l *linuxStandardInit) Init() error {
 	// N.B. the core issue itself (passing dirfds to the host filesystem) has
 	// since been resolved.
 	// https://github.com/torvalds/linux/blob/v4.9/fs/exec.c#L1290-L1318
-	fmt.Printf("DEBUG[%s]: Closing fifo file\n", time.Since(startTime))
+	slog.Debug("DEBUG: Closing fifo file", "time", time.Since(startTime))
 	_ = l.fifoFile.Close()
 
 	if s := l.config.SpecState; s != nil {
-		fmt.Printf("DEBUG[%s]: Running StartContainer hooks\n", time.Since(startTime))
+		slog.Debug("DEBUG: Running StartContainer hooks", "time", time.Since(startTime))
 		s.Pid = unix.Getpid()
 		s.Status = specs.StateCreated
 		if err := l.config.Config.Hooks.Run(configs.StartContainer, s); err != nil {
@@ -367,11 +378,11 @@ func (l *linuxStandardInit) Init() error {
 	// (otherwise the (*os.File) finaliser could close the wrong file). See
 	// CVE-2024-21626 for more information as to why this protection is
 	// necessary.
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to close file descriptors ***\n", time.Since(startTime))
+	slog.Debug("DEBUG: *** CRITICAL SECTION: About to close file descriptors ***", "time", time.Since(startTime))
 	if err := utils.UnsafeCloseFrom(l.config.PassedFilesCount + 3); err != nil {
-		fmt.Printf("DEBUG[%s]: Failed to close file descriptors: %v\n", time.Since(startTime), err)
+		slog.Debug("DEBUG: Failed to close file descriptors", "time", time.Since(startTime), "error", err)
 		return err
 	}
-	fmt.Printf("DEBUG[%s]: *** CRITICAL SECTION: About to exec %s ***\n", time.Since(startTime), name)
+	slog.Debug("DEBUG: *** CRITICAL SECTION: About to exec %s ***", "time", time.Since(startTime), "name", name)
 	return linux.Exec(name, l.config.Args, l.config.Env)
 }
