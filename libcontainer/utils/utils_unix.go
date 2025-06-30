@@ -4,6 +4,7 @@ package utils
 
 import (
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"path/filepath"
@@ -63,38 +64,56 @@ func fdRangeFrom(minFd int, fn fdFunc) error {
 	procSelfFd, closer := ProcThreadSelf("fd")
 	defer closer()
 
+	slog.Info("DEBUG: EnsureProcHandle A", "procSelfFd", procSelfFd)
+
 	fdDir, err := os.Open(procSelfFd)
 	if err != nil {
 		return err
 	}
+
+	slog.Info("DEBUG: EnsureProcHandle B", "fdDir", fdDir.Name())
 	defer fdDir.Close()
+
+	slog.Info("DEBUG: EnsureProcHandle C", "fdDir", fdDir.Name())
 
 	if err := EnsureProcHandle(fdDir); err != nil {
 		return err
 	}
 
+	slog.Info("DEBUG: EnsureProcHandle D", "fdDir", fdDir.Name())
+
 	fdList, err := fdDir.Readdirnames(-1)
 	if err != nil {
 		return err
 	}
+
+	slog.Info("DEBUG: EnsureProcHandle E", "fdDir", fdDir.Name())
+
 	for _, fdStr := range fdList {
+		slog.Info("DEBUG: EnsureProcHandle F", "fdStr", fdStr)
 		fd, err := strconv.Atoi(fdStr)
 		// Ignore non-numeric file names.
 		if err != nil {
 			continue
 		}
+		slog.Info("DEBUG: EnsureProcHandle G", "fd", fd)
 		// Ignore descriptors lower than our specified minimum.
 		if fd < minFd {
 			continue
 		}
+		slog.Info("DEBUG: EnsureProcHandle H", "fd", fd)
 		// Ignore the file descriptor we used for readdir, as it will be closed
 		// when we return.
 		if uintptr(fd) == fdDir.Fd() {
 			continue
 		}
+		slog.Info("DEBUG: EnsureProcHandle I", "fd", fd)
 		// Run the closure.
 		fn(fd)
 	}
+
+	slog.Info("DEBUG: EnsureProcHandle J", "fdDir", fdDir.Name())
+
 	return nil
 }
 
@@ -137,6 +156,7 @@ func runtime_IsPollDescriptor(fd uintptr) bool //nolint:revive
 func UnsafeCloseFrom(minFd int) error {
 	// We cannot use close_range(2) even if it is available, because we must
 	// not close some file descriptors.
+	logrus.Debugf("UnsafeCloseFrom: Starting to close FDs from %d", minFd)
 	return fdRangeFrom(minFd, func(fd int) {
 		if runtime_IsPollDescriptor(uintptr(fd)) {
 			// These are the Go runtimes internal netpoll file descriptors.
@@ -145,12 +165,40 @@ func UnsafeCloseFrom(minFd int) error {
 			// There is no issue with keeping them because they are not
 			// executable and are not useful to an attacker anyway. Also we
 			// don't have any choice.
+			logrus.Debugf("UnsafeCloseFrom: Skipping runtime poll descriptor fd=%d", fd)
 			return
 		}
+
+		// Add extra debugging for fd 8 which seems to cause problems
+		// Try to get information about this FD
+		var stat unix.Stat_t
+		err := unix.Fstat(fd, &stat)
+		if err != nil {
+			slog.Info("UnsafeCloseFrom: Cannot stat fd", "fd", fd, "err", err)
+		} else {
+			slog.Info("UnsafeCloseFrom: fd stat info", "fd", fd, "dev", stat.Dev, "ino", stat.Ino, "mode", stat.Mode)
+		}
+
+		// Try readlink on /proc/self/fd/8 to see what it points to
+		fdPath := fmt.Sprintf("/proc/self/fd/%d", fd)
+		target, err := os.Readlink(fdPath)
+		if err != nil {
+			slog.Info("UnsafeCloseFrom: Cannot readlink", "fdPath", fdPath, "err", err)
+		} else {
+			slog.Info("UnsafeCloseFrom: fd points to", "fd", fd, "target", target)
+		}
+
 		// There's nothing we can do about errors from close(2), and the
 		// only likely error to be seen is EBADF which indicates the fd was
 		// already closed (in which case, we got what we wanted).
-		_ = unix.Close(fd)
+		slog.Info("UnsafeCloseFrom: About to closed", "fd", fd)
+		err = unix.Close(fd)
+		if err != nil {
+			slog.Info("UnsafeCloseFrom: Error closing fd", "fd", fd, "err", err)
+		} else {
+			slog.Info("UnsafeCloseFrom: Successfully closed fd", "fd", fd)
+		}
+
 	})
 }
 

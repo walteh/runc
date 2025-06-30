@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -347,9 +348,11 @@ func (c *Container) start(process *Process) (retErr error) {
 
 	if logsDone != nil {
 		defer func() {
+			slog.Debug("DEBUG: START waiting for log forwarder")
 			// Wait for log forwarder to finish. This depends on
 			// runc init closing the _LIBCONTAINER_LOGPIPE log fd.
 			err := <-logsDone
+			slog.Debug("DEBUG: END waiting for log forwarder")
 			if err != nil && retErr == nil {
 				retErr = fmt.Errorf("unable to forward init logs: %w", err)
 			}
@@ -357,6 +360,9 @@ func (c *Container) start(process *Process) (retErr error) {
 	}
 
 	if process.Init {
+
+		slog.Debug("DEBUG: START closing fifo")
+		defer slog.Debug("DEBUG: END closing fifo")
 		c.fifo.Close()
 		if c.config.HasHook(configs.Poststart) {
 			s, err := c.currentOCIState()
@@ -514,6 +520,9 @@ func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 		logrus.Debug("runc exeseal: using /proc/self/exe clone") // used for tests
 	}
 
+	slog.Debug("RUNC:START[init-exec]", "exePath", exePath)
+	defer slog.Debug("RUNC:END  [init-exec]", "exePath", exePath)
+
 	cmd := exec.Command(exePath, "init")
 	cmd.Args[0] = os.Args[0]
 	cmd.Stdin = p.Stdin
@@ -590,6 +599,7 @@ func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 	}
 
 	if p.Init {
+		slog.Debug("DEBUG: newInitProcess", "exePath", exePath)
 		// We only set up fifoFd if we're not doing a `runc exec`. The historic
 		// reason for this is that previously we would pass a dirfd that allowed
 		// for container rootfs escape (and not doing it in `runc exec` avoided
@@ -600,6 +610,7 @@ func (c *Container) newParentProcess(p *Process) (parentProcess, error) {
 		}
 		return c.newInitProcess(p, cmd, comm)
 	}
+	slog.Debug("DEBUG: newSetnsProcess", "exePath", exePath)
 	return c.newSetnsProcess(p, cmd, comm)
 }
 

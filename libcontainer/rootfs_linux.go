@@ -136,7 +136,7 @@ func prepareRootfs(pipe *syncSocket, iConfig *initConfig) (err error) {
 						if info.FSType == "virtiofs" {
 							slog.Debug("DEBUG: Detected virtiofs rootfs, enabling NoPivotRoot automatically")
 							isVirtioFS = true
-							config.NoPivotRoot = true // Critical fix for virtiofs: Enable NoPivotRoot to use MS_MOVE
+							// config.NoPivotRoot = true // Critical fix for virtiofs: Enable NoPivotRoot to use MS_MOVE
 							slog.Debug("DEBUG: Setting NoPivotRoot", "NoPivotRoot", config.NoPivotRoot)
 							break
 						}

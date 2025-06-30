@@ -343,6 +343,11 @@ func (l *linuxStandardInit) Init() error {
 		slog.Debug("DEBUG: Starting goroutine to open FIFO", "time", time.Since(startTime))
 	} else {
 		fd, openErr = linux.Open(fifoPath, unix.O_WRONLY|unix.O_CLOEXEC, 0)
+		if openErr != nil {
+			slog.Debug("DEBUG: Failed to open fifo", "time", time.Since(startTime), "error", openErr)
+			return openErr
+		}
+		slog.Debug("DEBUG: FIFO opened successfully", "time", time.Since(startTime))
 		close(openDone)
 
 	}
@@ -384,5 +389,10 @@ func (l *linuxStandardInit) Init() error {
 		return err
 	}
 	slog.Debug("DEBUG: *** CRITICAL SECTION: About to exec %s ***", "time", time.Since(startTime), "name", name)
-	return linux.Exec(name, l.config.Args, l.config.Env)
+	err = linux.Exec(name, l.config.Args, l.config.Env)
+	if err != nil {
+		slog.Debug("DEBUG: *** CRITICAL SECTION: exec %s failed ***", "time", time.Since(startTime), "name", name, "error", err)
+	}
+	slog.Debug("DEBUG: *** CRITICAL SECTION: exec %s completed ***", "time", time.Since(startTime), "name", name)
+	return err
 }

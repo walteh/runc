@@ -560,9 +560,14 @@ func (p *initProcess) goCreateMountSources(ctx context.Context) (mountSourceRequ
 }
 
 func (p *initProcess) start() (retErr error) {
-	defer p.comm.closeParent()
+	defer func() {
+		slog.Debug("DEBUG: AHH1 About to close parent")
+		p.comm.closeParent()
+	}()
 	err := p.cmd.Start()
 	p.process.ops = p
+
+	slog.Debug("DEBUG: AHH2 About to close child")
 	// close the child-side of the pipes (controlled by child)
 	p.comm.closeChild()
 	if err != nil {
@@ -712,14 +717,20 @@ func (p *initProcess) start() (retErr error) {
 		}
 	}
 
-	fmt.Printf("p.config %v\n", p.config)
+	slog.Debug("DEBUG: p.config", "config", p.config)
 
 	if err := utils.WriteJSON(p.comm.initSockParent, p.config); err != nil {
 		return fmt.Errorf("error sending config to init process: %w", err)
 	}
 
+	slog.Debug("DEBUG: wrote config to init process, about to parse sync")
+
+	defer slog.Debug("DEBUG: DONE parsing sync")
+
 	var seenProcReady bool
 	ierr := parseSync(p.comm.syncSockParent, func(sync *syncT) error {
+		slog.Debug("DEBUG: START sync from callback", "sync_type", sync.Type)
+		defer slog.Debug("DEBUG: END   sync from callback", "sync_type", sync.Type)
 		switch sync.Type {
 		case procMountPlease:
 			if mountRequest == nil {
