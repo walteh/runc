@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -116,7 +117,23 @@ func (p *containerProcess) startTime() (uint64, error) {
 }
 
 func (p *containerProcess) signal(sig os.Signal) error {
-	return p.cmd.Process.Signal(sig)
+	if p.cmd == nil {
+		slog.Error("RUNC SIGNAL DEBUG: containerProcess.signal called but cmd is nil")
+		return fmt.Errorf("command is nil")
+	}
+	if p.cmd.Process == nil {
+		slog.Error("RUNC SIGNAL DEBUG: containerProcess.signal called but cmd.Process is nil")
+		return fmt.Errorf("process is nil")
+	}
+	pid := p.cmd.Process.Pid
+	slog.Info("RUNC SIGNAL DEBUG: containerProcess.signal sending signal to PID", "signal", sig, "process_pid", pid)
+	err := p.cmd.Process.Signal(sig)
+	if err != nil {
+		slog.Error("RUNC SIGNAL DEBUG: Failed to send signal to PID", "signal", sig, "pid", pid, "error", err)
+	} else {
+		slog.Info("RUNC SIGNAL DEBUG: Successfully sent signal to PID", "signal", sig, "pid", pid)
+	}
+	return err
 }
 
 func (p *containerProcess) externalDescriptors() []string {

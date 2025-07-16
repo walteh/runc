@@ -2,6 +2,7 @@ package libcontainer
 
 import (
 	"errors"
+	"log/slog"
 	"os"
 	"os/exec"
 
@@ -63,6 +64,7 @@ func (p *restoredProcess) startTime() (uint64, error) {
 }
 
 func (p *restoredProcess) signal(s os.Signal) error {
+	slog.Info("RUNC SIGNAL DEBUG: restoredProcess.signal sending signal to PID", "signal", s, "process_pid", p.cmd.Process.Pid)
 	return p.cmd.Process.Signal(s)
 }
 
@@ -110,8 +112,10 @@ func (p *nonChildProcess) startTime() (uint64, error) {
 func (p *nonChildProcess) signal(s os.Signal) error {
 	proc, err := os.FindProcess(p.processPid)
 	if err != nil {
+		slog.Error("RUNC SIGNAL DEBUG: restoredProcess.signal failed to find process", "error", err)
 		return err
 	}
+	slog.Info("RUNC SIGNAL DEBUG: restoredProcess.signal sending signal to PID", "signal", s, "process_pid", p.processPid)
 	return proc.Signal(s)
 }
 

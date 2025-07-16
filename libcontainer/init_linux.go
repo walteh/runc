@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -690,12 +691,21 @@ func signalAllProcesses(m cgroups.Manager, s unix.Signal) error {
 		}
 		return err
 	}
+	slog.Info("RUNC KILL DEBUG: About to kill processes", "count", len(pids), "signal", s, "pids", pids)
 	for _, pid := range pids {
+		slog.Info("RUNC KILL DEBUG: Calling unix.Kill", "pid", pid, "signal", s)
 		err := unix.Kill(pid, s)
-		if err != nil && err != unix.ESRCH {
-			logrus.Warnf("kill %d: %v", pid, err)
+		if err != nil {
+			if err == unix.ESRCH {
+				slog.Info("RUNC KILL DEBUG: Process not found (ESRCH) - already exited", "pid", pid)
+			} else {
+				slog.Warn("RUNC KILL DEBUG: Failed to kill process", "pid", pid, "signal", s, "error", err)
+			}
+		} else {
+			slog.Info("RUNC KILL DEBUG: Successfully sent signal to process", "signal", s, "pid", pid)
 		}
 	}
+	slog.Info("RUNC KILL DEBUG: Finished killing all processes")
 	if err := m.Freeze(cgroups.Thawed); err != nil {
 		logrus.Warn(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path"
@@ -384,6 +385,9 @@ func (c *Container) Signal(s os.Signal) error {
 	c.m.Lock()
 	defer c.m.Unlock()
 
+	isPidPrivate := c.config.Namespaces.IsPrivate(configs.NEWPID)
+	slog.Info("RUNC SIGNAL DEBUG: Container.Signal called", "signal", s, "pid_namespace_private", isPidPrivate)
+
 	// When a container has its own PID namespace, inside it the init PID
 	// is 1, and thus it is handled specially by the kernel. In particular,
 	// killing init with SIGKILL from an ancestor namespace will also kill
@@ -391,7 +395,8 @@ func (c *Container) Signal(s os.Signal) error {
 	//
 	// OTOH, if PID namespace is shared, we should kill all pids to avoid
 	// leftover processes. Handle this special case here.
-	if s == unix.SIGKILL && !c.config.Namespaces.IsPrivate(configs.NEWPID) {
+	if s == unix.SIGKILL && !isPidPrivate {
+		slog.Info("RUNC SIGNAL DEBUG: Taking signalAllProcesses path for SIGKILL with shared PID namespace")
 		if err := signalAllProcesses(c.cgroupManager, unix.SIGKILL); err != nil {
 			if c.config.RootlessCgroups { // may not have an access to cgroup
 				logrus.WithError(err).Warn("failed to kill all processes, possibly due to lack of cgroup (Hint: enable cgroup v2 delegation)")
@@ -409,17 +414,23 @@ func (c *Container) Signal(s os.Signal) error {
 		return nil
 	}
 
+	slog.Info("RUNC SIGNAL DEBUG: Taking regular signal path", "signal", s)
 	return c.signal(s)
 }
 
 func (c *Container) signal(s os.Signal) error {
+	slog.Info("RUNC SIGNAL DEBUG: c.signal called", "signal", s)
 	// To avoid a PID reuse attack, don't kill non-running container.
 	if !c.hasInit() {
+		slog.Info("RUNC SIGNAL DEBUG: Container has no init process, returning ErrNotRunning")
 		return ErrNotRunning
 	}
+	slog.Info("RUNC SIGNAL DEBUG: Calling initProcess.signal", "signal", s)
 	if err := c.initProcess.signal(s); err != nil {
+		slog.Error("RUNC SIGNAL DEBUG: initProcess.signal failed", "error", err)
 		return fmt.Errorf("unable to signal init: %w", err)
 	}
+	slog.Info("RUNC SIGNAL DEBUG: initProcess.signal succeeded")
 	if s == unix.SIGKILL {
 		// For cgroup v1, killing a process in a frozen cgroup
 		// does nothing until it's thawed. Only thaw the cgroup
