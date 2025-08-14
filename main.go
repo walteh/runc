@@ -77,7 +77,7 @@ your host. Providing the bundle directory using "-b" is optional. The default
 value for "bundle" is the current directory.`
 )
 
-func main() {
+func App() *cli.App {
 	app := cli.NewApp()
 	app.Name = "runc"
 	app.Version = strings.TrimSpace(version) + extraVersion
@@ -163,10 +163,19 @@ func main() {
 		return configLogrus(context)
 	}
 
+	cli.ErrWriter = &FatalWriter{cli.ErrWriter}
+
+	return app
+
+}
+
+func main() { Main() }
+
+func Main() {
+	app := App()
 	// If the command returns an error, cli takes upon itself to print
 	// the error on cli.ErrWriter and exit.
 	// Use our own writer here to ensure the log gets sent to the right location.
-	cli.ErrWriter = &FatalWriter{cli.ErrWriter}
 	if err := app.Run(os.Args); err != nil {
 		fatal(err)
 	}
